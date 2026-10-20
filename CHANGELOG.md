@@ -2,6 +2,22 @@
 
 All notable changes to the ArcGIS Pro port of Mapping-Units-Generator.
 
+## [1.1.1] - 2026-10-20 - Audit fixes
+
+### Fixed
+- **B1:** a whitespace-only existing MU is now treated as UNMAPPED — the value is stripped before the existing/non-soil checks, mirroring the QGIS behaviour. Padded shapefile values (`"   "`) no longer pose as surveyor-verified codes.
+- **B2:** existing verified codes are written back stripped of leading/trailing whitespace, consistent with QGIS.
+- **D2:** records with null geometry are no longer silently assigned from the (0.0, 0.0) centroid fallback — assignment is skipped, the output fields are left blank, and the polygon is flagged `missing geometry - skipped`. Null-geometry records are also excluded from the training set and the nearest-neighbour source list, so their fallback position cannot influence other polygons.
+
+### Documentation
+- The no-`DEPTH_FLD` depth term is now called a *depth-concentration weight* in the README and code comments (it is true *depth agreement* only when `DEPTH_FLD` supplies the polygon's own depth class).
+- `MU_Conf` is documented as a heuristic confidence score (0–100), not a calibrated probability, noting that it mixes model probabilities, vote shares and heuristic values across methods.
+- The deliberate design rule that an in-candidate classifier pick is accepted at its model probability *without* the `CLASSIFIER_CONF_MIN` gate (B4) is now stated explicitly in the README Method section and at the acceptance code.
+- Limitations now disclose random (non-spatial) cross-validation, coordinates as classifier features, Stage 2 modal homogenisation of within-series variation, and literal geology/physiography name matching.
+
+### Added
+- `tests/` — the QGIS repo's unit tests ported to run against this file's extracted pure functions (`tests/test_decompose_mu.py`, `tests/test_series_evidence.py`); both pass in plain Python, no ArcGIS Pro install needed.
+
 ## [1.1.0] - 2026-10-20 - SLUSI two-stage driver method
 
 ### Changed

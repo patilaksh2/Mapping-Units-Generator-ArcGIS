@@ -116,7 +116,9 @@ EXISTING_MU_FLD  = "MU"           # field on the soil layer holding known MU cod
 POINT_MU_FLD     = "MU"           # field on the ground-truth points holding MU codes
 DEPTH_FLD        = ""             # OPTIONAL: field on the SOIL layer holding a known
                                   # depth class per polygon (a primary driver - feeds
-                                  # Stage 1 depth agreement and Stage 2). "" = disabled.
+                                  # Stage 1 depth agreement and Stage 2; without it,
+                                  # Stage 1 uses a depth-concentration weight
+                                  # instead). "" = disabled.
 SLOPE_FLD        = ""             # OPTIONAL: field on the SOIL layer holding a slope
                                   # code per polygon (used by Stage 2 before the
                                   # series' modal slope). "" = disabled.
@@ -346,6 +348,9 @@ def build_training_set(records, non_soil_codes):
         mu = rec["mu"]
         if not mu or str(mu).strip().upper() in non_soil_codes:
             continue
+        if rec["geom"] is None:
+            continue  # no location - a (0.0, 0.0) training row would
+            # distort the coordinate statistics (audit fix D2)
         comps = decompose_mu(mu)
         if not comps or not comps["SeriesCode"]:
             continue
@@ -457,9 +462,13 @@ def rank_series_candidates(evidence, geology, physiography,
     Candidates are the series whose observed geology set contains
     `geology` AND whose observed physiography set contains
     `physiography`. Ranked by, in order:
-      1. depth agreement - if `known_depth` is given, the share of the
-         candidate's mapped polygons carrying that depth class;
-         otherwise the share carrying the candidate's modal depth class;
+      1. the depth term - if `known_depth` is given (e.g. from
+         DEPTH_FLD), true depth agreement: the share of the candidate's
+         mapped polygons carrying the polygon's own depth class. If no
+         known depth exists, a depth-concentration weight instead: the
+         share of the candidate's mapped polygons carrying its modal
+         depth class - a measure of how depth-consistent the series
+         itself is, containing no information about this polygon;
       2. classifier probability for the series (`classifier_probs` maps
          series -> probability %; a series missing from it counts as -1);
       3. support (number of mapped polygons);
@@ -500,14 +509,19 @@ def rank_series_candidates(evidence, geology, physiography,
 
 def primary_driver_confidence(depth_agreement, support, total_support):
     """
-    Confidence (%) for a primary_driver_match assignment:
+    Heuristic confidence SCORE (0-100 - not a calibrated probability)
+    for a primary_driver_match assignment:
 
-        50 + 30 * depth-agreement share + 20 * relative support
+        50 + 30 * depth-term share + 20 * relative support
 
-    where relative support = the candidate's polygon count / the total
-    mapped-polygon count across all series. Clamped to 0-100. The base
-    50 reflects that both primary drivers (geology + physiography)
-    already matched exactly; depth agreement and prevalence refine it.
+    where the depth-term share is the `depth_agreement` value produced
+    by rank_series_candidates (true depth agreement when a known depth
+    was supplied, otherwise the candidate's depth-concentration
+    weight), and relative support = the candidate's polygon count /
+    the total mapped-polygon count across all series. Clamped to
+    0-100. The base 50 reflects that both primary drivers (geology +
+    physiography) already matched exactly; the depth term and
+    prevalence refine it.
     """
     relative_support = (support / total_support) if total_support else 0.0
     score = 50.0 + 30.0 * depth_agreement + 20.0 * relative_support
@@ -786,6 +800,9 @@ def build_mapped_list(records, non_soil_codes):
     """(centroid_x, centroid_y, mu) for every already-mapped polygon."""
     mapped = []
     for rec in records:
+        if rec["geom"] is None:
+            continue  # no location - its (0.0, 0.0) fallback position
+            # must not become a nearest-neighbour source (audit fix D2)
         mu = rec["mu"]
         if mu and str(mu).strip().upper() not in non_soil_codes:
             mapped.append((rec["x"], rec["y"], str(mu)))
@@ -845,20 +862,39 @@ def assign_mapping_units(records, gt_points, model_info, mapped,
     confidences = []
 
     for rec in records:
-        existing_mu = rec["mu"]
+        # Strip BEFORE branching, exactly as the QGIS version does
+        # (audit fixes B1/B2): a whitespace-only MU is UNMAPPED, not a
+        # surveyor-verified code, and verified codes are written back
+        # stripped of any padding.
+        raw_mu = rec["mu"]
+        existing_mu = str(raw_mu).strip() if raw_mu else ""
 
-        if existing_mu and str(existing_mu).strip().upper() not in NON_SOIL_CODES:
+        if existing_mu and existing_mu.upper() not in NON_SOIL_CODES:
             # Surveyor-verified - never altered, only decomposed.
             comps = decompose_mu(existing_mu)
             method, conf, flag = "existing", 100.0, ""
-            mu_new = str(existing_mu)
+            mu_new = existing_mu
             if comps is None:
                 comps = dict(_EMPTY_COMPS)
                 flag = ("existing MU code does not match the expected "
                         "pattern - kept as-is")
-        elif existing_mu and str(existing_mu).strip().upper() in NON_SOIL_CODES:
+        elif existing_mu and existing_mu.upper() in NON_SOIL_CODES:
             continue  # leave non-soil polygons untouched
         else:
+            if rec["geom"] is None:
+                # Audit fix D2: this record has no geometry, so its
+                # centroid fell back to (0.0, 0.0) - a fictitious
+                # location. Never let a spatial tier (IDW, classifier
+                # coordinates, nearest neighbour) silently assign from
+                # it: leave every output field blank and flag the
+                # polygon instead.
+                rec["comps"] = dict(_EMPTY_COMPS)
+                rec["mu_new"] = ""
+                rec["source"] = ""
+                rec["conf"] = None
+                rec["method"] = ""
+                rec["flag"] = "missing geometry - skipped"
+                continue
             series, conf, method, flag = None, 0.0, "fallback", ""
             full_code = None
 
@@ -895,6 +931,13 @@ def assign_mapping_units(records, gt_points, model_info, mapped,
                 )
                 candidate_series = {c["series"] for c in candidates}
                 if candidates and pred_series in candidate_series:
+                    # Deliberate design rule (audit note B4, documented
+                    # in the README Method section): inside the
+                    # candidate set the classifier's top series is
+                    # accepted at its model probability WITHOUT the
+                    # CLASSIFIER_CONF_MIN gate - evidence membership is
+                    # the gate. CLASSIFIER_CONF_MIN only gates the
+                    # no-candidate path further below.
                     series, conf, method = pred_series, pred_conf, "ml_classifier"
                 elif candidates:
                     top = candidates[0]
@@ -990,7 +1033,7 @@ def write_results(fc, records):
                            safe_str(comps.get("ErosionNum"), 5),
                            safe_str(rec["mu_new"], 30),
                            rec["source"],
-                           float(rec["conf"]),
+                           float(rec["conf"]) if rec["conf"] is not None else None,
                            safe_str(rec["method"], 40),
                            safe_str(rec["flag"], 100)])
 

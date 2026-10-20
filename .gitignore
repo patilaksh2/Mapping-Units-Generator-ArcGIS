@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ArcGIS Pro scratch and lock files
+*.lock
+*.atx
+*.gdb.zip
+# File geodatabases are folders of internal files - keep real project
+# geodatabases out of git unless you deliberately version them:
+# *.gdb/
+
+# Script scratch outputs (in_memory data never reaches disk; anything
+# written under these folders is a run by-product)
+scratch/
+output/
+
+# Local configuration with real paths (keep paths out of git)
+config.py
+.env
